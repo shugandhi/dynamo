@@ -57,6 +57,10 @@ inputs:
     description: 'Additional pytest arguments (e.g., --frontend-image=...)'
     required: false
     default: ''
+  cleanup_deployment:
+    description: 'Clean up the single DGD named by the standard deployment fixture.'
+    required: false
+    default: 'true'
 
 runs:
   using: "composite"
@@ -151,7 +155,7 @@ runs:
           --output-directory="${DYN_TEST_OUTPUT_PATH}/cluster-info" || true
 
     - name: Cleanup Deployment
-      if: always()
+      if: always() && inputs.cleanup_deployment == 'true'
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
