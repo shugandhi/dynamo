@@ -52,7 +52,7 @@ inputs:
   test_file:
     description: 'Pytest file to run.'
     required: false
-    default: 'tests/deploy/test_deploy.py'
+    default: 'tests/deploy/test_dgd.py'
   extra_pytest_args:
     description: 'Additional pytest arguments (e.g., --frontend-image=...)'
     required: false
