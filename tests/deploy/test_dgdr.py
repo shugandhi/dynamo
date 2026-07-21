@@ -266,7 +266,6 @@ async def test_dgdr_profiling_includes_planner_service(
 
 
 @pytest.mark.gpu_0
-@pytest.mark.xfail(reason="Known issue #8583: rapid mode can exceed totalGpus")
 @pytest.mark.timeout(3660)
 async def test_dgdr_profiling_respects_total_gpu_budget(
     dgdr_manager: ManagedDGDR,

@@ -10,22 +10,23 @@ example `DynamoGraphDeployment` manifests. `test_dgdr.py` validates the operator
 `DynamoGraphDeploymentRequest` API, and `test_dgdr_h100.py` contains its real-GPU
 H100 support matrix.
 
-The GPU-free DGDR suite needs a cluster with the Dynamo operator installed and a
-planner image:
+The CPU DGDR lane uses mocker workers and needs a cluster with the Dynamo
+operator installed and a planner image:
 
 ```bash
 python -m pytest tests/deploy/test_dgdr.py \
-  --namespace=operator-e2e \
+  --namespace=dgdr-test \
   --image=registry.example/dynamo-planner:tag \
   -m gpu_0 -v -s
 ```
 
-The H100 matrix additionally requires real workers and the cluster-specific
-model access settings:
+The GPU lane uses the `gpu_1` cases in `test_dgdr.py` and the H100 support matrix
+in `test_dgdr_h100.py`. The latter additionally requires eight H100 GPUs and the
+cluster-specific model access settings:
 
 ```bash
 python -m pytest tests/deploy/test_dgdr_h100.py \
-  --namespace=operator-e2e \
+  --namespace=dgdr-test \
   --image=registry.example/dynamo-planner:tag \
   --dgdr-no-mocker \
   --dgdr-hf-token-secret=hf-token-secret \
