@@ -117,7 +117,6 @@ jobs:
           test_name: dgdr-cpu
           test_file: tests/deploy/test_dgdr.py
           extra_pytest_args: -m gpu_0 --dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }} --dgdr-hf-token-secret=hf-token-secret
-          diagnostic_resources: dynamographdeploymentrequests,dynamographdeployments,jobs,pods
           cleanup_deployment: 'false'
 
       - name: Clean up DGDR test namespace
