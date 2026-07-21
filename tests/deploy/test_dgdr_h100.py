@@ -46,9 +46,7 @@ H100_TTFT_MS = _env_float("DGDR_H100_TTFT_MS", 500.0)
 H100_ITL_MS = _env_float("DGDR_H100_ITL_MS", 30.0)
 H100_ISL = _env_int("DGDR_H100_ISL", 3000)
 H100_OSL = _env_int("DGDR_H100_OSL", 300)
-H100_TOTAL_GPUS = _env_int("DGDR_H100_TOTAL_GPUS", 32)
-H100_GPUS_PER_NODE = _env_int("DGDR_H100_NUM_GPUS_PER_NODE", 8)
-H100_MAX_GPU_BUDGET = _env_int("DGDR_H100_MAX_GPU_BUDGET", 32)
+H100_GPU_COUNT = 8
 
 BACKENDS = [
     pytest.param("vllm", marks=pytest.mark.vllm),
@@ -68,15 +66,15 @@ def _h100_spec(model: str, backend: str) -> dict:
         "hardware": {
             "gpuSku": "h100_sxm",
             "vramMb": 81920.0,
-            "numGpusPerNode": H100_GPUS_PER_NODE,
-            "totalGpus": H100_TOTAL_GPUS,
+            "numGpusPerNode": H100_GPU_COUNT,
+            "totalGpus": H100_GPU_COUNT,
         },
         "features": {
             "planner": {
                 "mode": "disagg",
                 "enable_throughput_scaling": True,
                 "enable_load_scaling": True,
-                "max_gpu_budget": H100_MAX_GPU_BUDGET,
+                "max_gpu_budget": H100_GPU_COUNT,
             }
         },
     }
