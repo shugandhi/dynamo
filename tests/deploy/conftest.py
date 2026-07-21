@@ -380,8 +380,10 @@ async def dgdr_manager(
         yield manager
     finally:
         failed = request.node.stash.get(_deploy_test_failed_key, False)
-        await manager.cleanup(failed=failed)
-        await manager.close()
+        try:
+            await manager.cleanup(failed=failed)
+        finally:
+            await manager.close()
 
 
 @pytest.fixture

@@ -197,6 +197,18 @@ def kubectl(*args: str, input_: str | None = None) -> subprocess.CompletedProces
     )
 
 
+class DGDRCleanupError(RuntimeError):
+    """Report every DGDR that could not be cleaned up."""
+
+    def __init__(self, namespace: str, failures: list[tuple[str, Exception]]):
+        self.failures = tuple(failures)
+        details = "; ".join(
+            f"{namespace}/{name}: {type(error).__name__}: {error}"
+            for name, error in failures
+        )
+        super().__init__(f"Failed to clean up DGDR resources: {details}")
+
+
 class ManagedDGDR:
     """Own DGDR resources for one pytest item and clean them up idempotently."""
 
@@ -438,13 +450,23 @@ class ManagedDGDR:
         await self._cleanup_name(name, failed=False)
 
     async def cleanup(self, failed: bool) -> None:
+        failures: list[tuple[str, Exception]] = []
         for name in reversed(self._created_names):
             try:
                 await self._cleanup_name(name, failed=failed)
-            except Exception:
+            except Exception as error:
+                failures.append((name, error))
                 logger.exception(
                     "Failed to clean up DGDR %s/%s", self.config.namespace, name
                 )
+
+        if failures:
+            failed_names = {name for name, _ in failures}
+            self._created_names = [
+                name for name in self._created_names if name in failed_names
+            ]
+            raise DGDRCleanupError(self.config.namespace, failures)
+
         self._created_names.clear()
 
     async def _cleanup_name(self, name: str, failed: bool) -> None:
@@ -558,19 +580,65 @@ class ManagedDGDR:
 
     async def _log_diagnostics(self, dgdr: dict[str, Any]) -> None:
         self._require_clients()
-        assert self.core is not None
         logger.error("DGDR failure diagnostics:\n%s", json.dumps(dgdr, indent=2))
-        dgd_name = dgdr.get("status", {}).get("dgdName")
-        if not dgd_name:
+
+        status = dgdr.get("status", {})
+        profiling_job_name = status.get("profilingJobName")
+        if profiling_job_name:
+            await self._log_profiling_job_diagnostics(profiling_job_name)
+
+        dgd_name = status.get("dgdName")
+        if dgd_name:
+            try:
+                dgd = await self.get_dgd(dgd_name)
+                logger.error("DGD failure diagnostics:\n%s", json.dumps(dgd, indent=2))
+            except exceptions.ApiException as error:
+                logger.warning(
+                    "Could not read DGD %s/%s: %s",
+                    self.config.namespace,
+                    dgd_name,
+                    error,
+                )
+            await self._log_pod_diagnostics(f"{DGD_LABEL}={dgd_name}")
+
+    async def _log_profiling_job_diagnostics(self, name: str) -> None:
+        self._require_clients()
+        assert self.batch is not None
+        try:
+            job = await self.batch.read_namespaced_job(name, self.config.namespace)
+            logger.error("Profiling Job failure diagnostics:\n%s", job.to_str())
+        except exceptions.ApiException as error:
+            logger.warning(
+                "Could not read profiling Job %s/%s: %s",
+                self.config.namespace,
+                name,
+                error,
+            )
+        await self._log_pod_diagnostics(f"job-name={name}")
+
+    async def _log_pod_diagnostics(self, label_selector: str) -> None:
+        self._require_clients()
+        assert self.core is not None
+        try:
+            pods = await self.core.list_namespaced_pod(
+                self.config.namespace, label_selector=label_selector
+            )
+        except exceptions.ApiException as error:
+            logger.warning(
+                "Could not list pods in %s matching %s: %s",
+                self.config.namespace,
+                label_selector,
+                error,
+            )
             return
-        dgd = await self.get_dgd(dgd_name)
-        logger.error("DGD failure diagnostics:\n%s", json.dumps(dgd, indent=2))
-        pods = await self.core.list_namespaced_pod(
-            self.config.namespace, label_selector=f"{DGD_LABEL}={dgd_name}"
-        )
+
         for pod in pods.items:
             logger.error("Pod failure diagnostics:\n%s", pod.to_str())
-            for container in [*(pod.spec.init_containers or []), *pod.spec.containers]:
+            containers = [
+                *(pod.spec.init_containers or []),
+                *(pod.spec.containers or []),
+            ]
+            for container in containers:
                 try:
                     logs = await self.core.read_namespaced_pod_log(
                         pod.metadata.name,

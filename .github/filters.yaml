@@ -180,6 +180,7 @@ dgdr:
   - 'tests/deploy/dgdr_utils.py'
   - 'tests/deploy/test_dgdr.py'
   - 'tests/deploy/test_dgdr_h100.py'
+  - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/utils/managed_deployment.py'
 
 planner:
