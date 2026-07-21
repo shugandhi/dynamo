@@ -29,6 +29,7 @@ jobs:
       snapshot: ${{ steps.changes.outputs.snapshot }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
       deploy: ${{ steps.changes.outputs.deploy }}
+      dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
@@ -907,7 +908,8 @@ jobs:
     needs: [changed-files, planner-build]
     if: |
       always() && !cancelled() &&
-      needs.changed-files.outputs.operator == 'true' &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.dgdr == 'true') &&
       needs.planner-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -1142,7 +1144,8 @@ jobs:
     needs: [changed-files, deploy-operator, planner-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      needs.changed-files.outputs.operator == 'true'
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.dgdr == 'true')
     uses: ./.github/workflows/shared-dgdr-deploy-test.yml
     with:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
