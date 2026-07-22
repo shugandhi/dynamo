@@ -13,7 +13,11 @@ from gpu_memory_service.v1.errors import GMSError
 from gpu_memory_service.v1.protocol import AccessClass, Allocation, Generation, Mapping
 from gpu_memory_service.v1.registry import Registry
 from gpu_memory_service.v1.tests.fakes import VMM
-from gpu_memory_service.v1.torch import TorchPools, discover_parameter_mappings
+from gpu_memory_service.v1.torch import (
+    TorchPools,
+    discover_parameter_mappings,
+    validate_buffer_mappings,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -48,11 +52,16 @@ class Parameter:
 
 
 class Model:
-    def __init__(self, *parameters):
+    def __init__(self, *parameters, buffers=()):
         self._parameters = parameters
+        self._buffers = buffers
 
     def parameters(self):
         return iter(self._parameters)
+
+    def named_buffers(self, *, remove_duplicate):
+        assert remove_duplicate is False
+        return iter(self._buffers)
 
 
 class CallbackOnlyManager:
@@ -131,6 +140,39 @@ def test_unexplained_live_parameter_allocation_fails_capture() -> None:
             Model(Parameter(Storage(1, 0x1040, 32))),
             (mapping(), mapping(base=0x2000, allocation_id="extra")),
         )
+
+
+def test_qwen_inv_freq_buffer_must_not_overlap_parameter_backing() -> None:
+    parameter = mapping(base=0x1000, size=0x100)
+    inv_freq = Parameter(Storage(2, 0x1080, 0x20))
+    model = Model(buffers=(("rotary_emb.inv_freq", inv_freq),))
+
+    with pytest.raises(GMSError, match="inv_freq.*overlaps parameter backing"):
+        validate_buffer_mappings(model, (parameter,))
+
+
+def test_aliased_buffer_storage_is_allowed_outside_parameter_backing() -> None:
+    storage = Storage(2, 0x2080, 0x20)
+    inv_freq = Parameter(storage)
+    alias = Parameter(storage)
+    model = Model(
+        buffers=(
+            ("rotary_emb.inv_freq", inv_freq),
+            ("rotary_emb.inv_freq_alias", alias),
+        )
+    )
+
+    validate_buffer_mappings(model, (mapping(base=0x1000, size=0x100),))
+
+
+def test_partially_overlapping_buffer_storage_is_rejected() -> None:
+    parameter = mapping(base=0x1000, size=0x100)
+    model = Model(
+        buffers=(("rotary_emb.inv_freq", Parameter(Storage(2, 0x0FF0, 0x20))),)
+    )
+
+    with pytest.raises(GMSError, match="overlaps parameter backing"):
+        validate_buffer_mappings(model, (parameter,))
 
 
 def test_allocator_free_callback_failure_is_latched() -> None:

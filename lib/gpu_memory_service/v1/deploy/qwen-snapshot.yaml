@@ -20,7 +20,7 @@ metadata:
   name: __NAME__
   namespace: __NAMESPACE__
   labels:
-    app.kubernetes.io/name: gms-v1-snapshot-e2e
+    app.kubernetes.io/name: gms-v1-qwen-snapshot-e2e
     nvidia.com/snapshot-checkpoint-id: __ARTIFACT_ID__
     nvidia.com/snapshot-is-checkpoint-source: "true"
   annotations:
@@ -64,7 +64,7 @@ spec:
     - name: engine
       image: __IMAGE__
       imagePullPolicy: IfNotPresent
-      command: [python3, -m, gpu_memory_service.v1.e2e]
+      command: [python3, -m, gpu_memory_service.v1.qwen_e2e]
       args:
         - --device
         - "0"
@@ -77,6 +77,14 @@ spec:
       env:
         - name: DYN_SNAPSHOT_CONTROL_DIR
           value: /snapshot-control
+        - name: GMS_V1_MODEL
+          value: __MODEL__
+        - name: HF_HOME
+          value: __MODEL_CACHE_PATH__
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: TRANSFORMERS_OFFLINE
+          value: "1"
       resources:
         claims:
           - name: shared-gpu
@@ -105,6 +113,8 @@ spec:
           subPath: engine
         - name: checkpoint-storage
           mountPath: __CHECKPOINT_PATH__
+        - name: model-cache
+          mountPath: __MODEL_CACHE_PATH__
   volumes:
     - name: gms
       emptyDir: {}
@@ -115,6 +125,9 @@ spec:
     - name: checkpoint-storage
       persistentVolumeClaim:
         claimName: __CHECKPOINT_PVC__
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: __MODEL_CACHE_PVC__
 ---
 apiVersion: nvidia.com/v1alpha1
 kind: PodSnapshot

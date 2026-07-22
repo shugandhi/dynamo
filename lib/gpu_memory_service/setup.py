@@ -119,6 +119,7 @@ setup(
             "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
             "gms-v1-server=gpu_memory_service.v1.cli:main",
             "gms-v1-e2e=gpu_memory_service.v1.e2e:main",
+            "gms-v1-qwen-e2e=gpu_memory_service.v1.qwen_e2e:main",
         ]
     },
     ext_modules=_create_ext_modules(),

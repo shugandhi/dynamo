@@ -23,7 +23,7 @@ pytestmark = [
     pytest.mark.post_merge,
     pytest.mark.e2e,
     pytest.mark.gpu_1,
-    pytest.mark.timeout(1200),
+    pytest.mark.timeout(1800),
 ]
 
 _SNAPSHOT = ("nvidia.com", "v1alpha1", "podsnapshots")
@@ -55,12 +55,22 @@ def _status(pod: Any, container: str):
 
 def _evidence(log: str, phase: str) -> dict[str, object]:
     prefix = "GMS_V1_EVIDENCE "
+    found: list[dict[str, object]] = []
     for line in log.splitlines():
         if line.startswith(prefix):
-            value = json.loads(line.removeprefix(prefix))
+            try:
+                value = json.loads(line.removeprefix(prefix))
+            except json.JSONDecodeError as exc:
+                raise AssertionError(f"malformed GMS V1 evidence line: {line}") from exc
+            if not isinstance(value, dict):
+                raise AssertionError(f"GMS V1 evidence is not an object: {value!r}")
             if value.get("phase") == phase:
-                return value
-    raise AssertionError(f"{phase} evidence not found in engine log:\n{log}")
+                found.append(value)
+    if not found:
+        raise AssertionError(f"{phase} evidence not found in engine log:\n{log}")
+    if any(value != found[0] for value in found[1:]):
+        raise AssertionError(f"conflicting {phase} evidence in engine log:\n{log}")
+    return found[0]
 
 
 def _snapshot_ready(value: dict[str, Any]) -> bool:
@@ -250,11 +260,20 @@ def _render(
     checkpoint_path: str,
     device_class: str,
     runtime_class: str,
+    harness: str = "toy",
+    model_cache_pvc: str | None = None,
+    model_cache_path: str = "/model-cache",
+    model: str = "Qwen/Qwen3-0.6B",
 ) -> list[dict[str, Any]]:
+    templates = {"toy": "snapshot.yaml", "qwen": "qwen-snapshot.yaml"}
+    try:
+        template = templates[harness]
+    except KeyError as exc:
+        raise ValueError(f"unknown GMS V1 harness {harness!r}") from exc
     text = (
         Path(__file__)
         .parents[1]
-        .joinpath("deploy", "snapshot.yaml")
+        .joinpath("deploy", template)
         .read_text(encoding="utf-8")
     )
     values = {
@@ -268,6 +287,9 @@ def _render(
         "__CHECKPOINT_PATH__": checkpoint_path,
         "__DEVICE_CLASS__": device_class,
         "__RUNTIME_CLASS__": runtime_class,
+        "__MODEL_CACHE_PVC__": model_cache_pvc or "",
+        "__MODEL_CACHE_PATH__": model_cache_path,
+        "__MODEL__": model,
     }
     for key, value in values.items():
         text = text.replace(key, value)
@@ -283,6 +305,7 @@ async def test_gms_v1_dra_snapshot_deployment(
     from kubernetes_asyncio.client import exceptions
 
     options = {
+        "harness": request.config.getoption("--gms-v1-harness"),
         "context": request.config.getoption("--gms-v1-kube-context"),
         "namespace": request.config.getoption("--gms-v1-namespace"),
         "node": request.config.getoption("--gms-v1-node"),
@@ -292,8 +315,14 @@ async def test_gms_v1_dra_snapshot_deployment(
         "checkpoint_path": request.config.getoption("--gms-v1-checkpoint-path"),
         "device_class": request.config.getoption("--gms-v1-device-class"),
         "runtime_class": request.config.getoption("--gms-v1-runtime-class"),
+        "model_cache_pvc": request.config.getoption("--gms-v1-model-cache-pvc"),
+        "model_cache_path": request.config.getoption("--gms-v1-model-cache-path"),
+        "model": request.config.getoption("--gms-v1-model"),
     }
-    missing = [key for key, value in options.items() if not value]
+    required = set(options)
+    if options["harness"] == "toy":
+        required.remove("model_cache_pvc")
+    missing = [key for key in required if not options[key]]
     if missing:
         pytest.fail(
             "explicit GMS V1 deployment options are required: " + ", ".join(missing),
@@ -433,12 +462,44 @@ async def test_gms_v1_dra_snapshot_deployment(
             previous = ""
         capture = _evidence(previous + "\n" + current, "capture")
         restore = _evidence(current, "restore")
+        assert restore["output"] == capture["output"]
+        assert restore["server_process"] == capture["server_process"]
         assert restore["output_equal"] is True
-        assert restore["identity_equal"] is True
-        assert restore["parameter_allocations_equal"] is True
         assert restore["private_backing_fresh"] is True
         assert restore["server_process_equal"] is True
-        assert restore["parameter_allocations"] == capture["parameter_allocations"]
+        if options["harness"] == "toy":
+            assert restore["identity"] == capture["identity"]
+            assert restore["identity_equal"] is True
+            assert restore["parameter_allocations_equal"] is True
+            assert restore["parameter_allocations"] == capture["parameter_allocations"]
+            assert restore["private_allocation_before"] == capture["private_allocation"]
+            assert restore["private_allocation_after"] != capture["private_allocation"]
+        else:
+            capture_private = capture["private_mapping"]
+            restore_private = restore["private_mapping"]
+            assert isinstance(capture_private, dict)
+            assert isinstance(restore_private, dict)
+            assert restore["tokens"] == capture["tokens"]
+            assert restore["identity"] == capture["identity"]
+            assert restore["private_identity"] == capture["private_identity"]
+            assert restore["gpu"] == capture["gpu"]
+            assert restore_private["allocation_id"] != capture_private["allocation_id"]
+            assert {
+                key: restore_private[key]
+                for key in ("base", "size", "reservation_size")
+            } == {
+                key: capture_private[key]
+                for key in ("base", "size", "reservation_size")
+            }
+            assert restore["token_equal"] is True
+            assert restore["identity_digest_equal"] is True
+            assert restore["parameter_mappings_equal"] is True
+            assert restore["private_identity_equal"] is True
+            assert restore["private_va_equal"] is True
+            assert restore["private_access"] == "private_rw"
+            assert restore["private_write"] is True
+            assert restore["same_gpu"] is True
+            assert restore["parameter_mappings"] == capture["parameter_mappings"]
     finally:
         test_failure = sys.exc_info()[1]
         cleanup_errors: list[Exception] = []

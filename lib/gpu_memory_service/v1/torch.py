@@ -93,6 +93,39 @@ def discover_parameter_mappings(
     return result
 
 
+def validate_buffer_mappings(model: object, mappings: "Iterable[Mapping]") -> None:
+    """Require every live CUDA named buffer storage to avoid parameter backing."""
+    parameters = tuple(
+        record
+        for record in mappings
+        if record.allocation.access is AccessClass.PARAMETER_RO
+    )
+    storages: dict[int, tuple[str, int, int]] = {}
+    for name, buffer in model.named_buffers(  # type: ignore[attr-defined]
+        remove_duplicate=False
+    ):
+        if buffer.device.type != "cuda":
+            continue
+        storage = buffer.untyped_storage()
+        size = int(storage.nbytes())
+        if size == 0:
+            continue
+        start = int(storage.data_ptr())
+        end = start + size
+        if end <= start:
+            raise GMSError(f"invalid CUDA buffer storage range for {name!r}")
+        identity = int(storage._cdata)
+        previous = storages.setdefault(identity, (name, start, end))
+        if previous[1:] != (start, end):
+            raise GMSError("buffer storage identity has inconsistent range")
+
+    for name, start, end in storages.values():
+        if any(start < record.end and record.base < end for record in parameters):
+            raise GMSError(
+                f"CUDA buffer storage for {name!r} overlaps parameter backing"
+            )
+
+
 class TorchPools:
     """Pinned Torch 2.11 parameter/private MemPools."""
 
@@ -165,6 +198,7 @@ class TorchPools:
         """Run the one supported capture preparation sequence."""
         try:
             self.collect_and_destroy()
+            validate_buffer_mappings(model, self._manager.mappings)
             parameters = discover_parameter_mappings(model, self._manager.mappings)
         except Exception as cause:
             failures: list[Exception] = []

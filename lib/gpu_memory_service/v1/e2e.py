@@ -195,9 +195,8 @@ async def run(
         )
     ):
         raise RuntimeError("snapshot evidence mismatch")
-    manager.retire()
     Path(f"{standby_marker}.restored").write_text("restored", encoding="utf-8")
-    restored_rpc.close()
+    await _standby()
 
 
 def main() -> None:
