@@ -1962,11 +1962,24 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events with `event: error` in the stream (handled by
-        // EventConverter and monitor_for_disconnects). This is standard SSE behavior.
+        // Peek at the first non-annotation event before committing HTTP 200: if
+        // the engine surfaces a synchronous backend error at t=0 (e.g.
+        // `Backend(InvalidArgument)` from a text-only model receiving image
+        // content, or from an unsupported JSON-schema keyword), we can still
+        // return the correct 4xx status + typed body — same code path as the
+        // non-streaming path. Once HTTP 200 is committed the
+        // downstream `monitor_for_disconnects` fallback can only report errors
+        // as a hardcoded generic 500 SSE frame, so catching here is the only
+        // way to preserve `Backend(InvalidArgument)` -> HTTP 400 on the
+        // streaming path.
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+        let stream = check_for_backend_error(stream)
+            .await
+            .map_err(|err_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", err_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
@@ -2441,10 +2454,21 @@ async fn responses(
     let ctx = engine_stream.context();
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events in the stream. This is standard SSE behavior.
+        // Peek at the first non-annotation event before committing HTTP 200: if
+        // the engine surfaces a synchronous backend error at t=0 (e.g.
+        // `Backend(InvalidArgument)` from a text-only model receiving image
+        // content, or from an unsupported JSON-schema keyword), return the
+        // correct 4xx status + typed body — same as the non-streaming path.
+        // Once HTTP 200 is committed the downstream error frame is a hardcoded generic 500.
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+        let engine_stream =
+            check_for_backend_error(engine_stream)
+                .await
+                .map_err(|err_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", err_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
+                })?;
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
