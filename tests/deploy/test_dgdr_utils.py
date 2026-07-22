@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from tests.deploy.dgdr_utils import DGDRCleanupError, DGDRTestConfig, ManagedDGDR
+from tests.deploy.dgdr_utils import (
+    DGDRCleanupError,
+    DGDRTestConfig,
+    ManagedDGDR,
+    parse_final_dgd,
+    run_lifecycle,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -20,6 +26,46 @@ def initialized_manager() -> ManagedDGDR:
     manager.batch = MagicMock()
     manager.apiextensions = MagicMock()
     return manager
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("", "must contain at least one YAML document"),
+        ("kind: ConfigMap", "must be a DynamoGraphDeployment"),
+    ],
+)
+def test_parse_final_dgd_rejects_invalid_external_data(
+    content: str, message: str
+) -> None:
+    with pytest.raises(AssertionError, match=message):
+        parse_final_dgd(content)
+
+
+async def test_lifecycle_preserves_combined_deployment_timeout() -> None:
+    manager = ManagedDGDR(
+        DGDRTestConfig(
+            namespace="test-namespace",
+            image="test",
+            profiling_timeout=17,
+            deploy_timeout=11,
+        )
+    )
+    manager.create = AsyncMock()
+    manager.wait_for_phase_at_least = AsyncMock(
+        return_value={"status": {"profilingJobName": "profiling-job"}}
+    )
+    manager.wait_for_phase = AsyncMock(
+        return_value={"status": {"dgdName": "deployment"}}
+    )
+
+    await run_lifecycle(
+        manager,
+        {"metadata": {"name": "request"}, "spec": {}},
+        verify_configmap=False,
+    )
+
+    manager.wait_for_phase.assert_awaited_once_with("request", "Deployed", 28)
 
 
 async def test_cleanup_reports_all_failures_and_retains_failed_names() -> None:

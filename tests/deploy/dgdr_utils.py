@@ -150,14 +150,18 @@ def build_dgdr(
 
 
 def parse_final_dgd(content: str) -> dict[str, Any]:
-    """Return the last YAML document and assert that it is a DGD."""
+    """Return the last YAML document after validating that it is a DGD."""
 
     documents = [document for document in yaml.safe_load_all(content) if document]
-    assert documents, "final_config.yaml must contain at least one YAML document"
+    if not documents:
+        raise AssertionError(
+            "final_config.yaml must contain at least one YAML document"
+        )
     result = documents[-1]
-    assert (
-        result.get("kind") == "DynamoGraphDeployment"
-    ), "last final_config.yaml document must be a DynamoGraphDeployment"
+    if result.get("kind") != "DynamoGraphDeployment":
+        raise AssertionError(
+            "last final_config.yaml document must be a DynamoGraphDeployment"
+        )
     return result
 
 
@@ -369,10 +373,12 @@ class ManagedDGDR:
             f"dgdr-output-{name}", self.config.namespace
         )
         data = configmap.data or {}
-        assert data.get(
-            "final_config.yaml"
-        ), f"ConfigMap dgdr-output-{name} must contain final_config.yaml"
-        return parse_final_dgd(data["final_config.yaml"])
+        content = data.get("final_config.yaml")
+        if not content:
+            raise AssertionError(
+                f"ConfigMap dgdr-output-{name} must contain final_config.yaml"
+            )
+        return parse_final_dgd(content)
 
     async def assert_profiling_job_succeeded(self, name: str) -> None:
         self._require_clients()
@@ -675,7 +681,8 @@ async def run_lifecycle(
     name = manifest["metadata"]["name"]
     result = await manager.wait_for_phase_at_least(name, "Ready")
     status = result.get("status", {})
-    assert status.get("profilingJobName"), "profilingJobName must be set"
+    if not status.get("profilingJobName"):
+        raise AssertionError("profilingJobName must be set")
 
     output = await manager.get_output_dgd(name) if verify_configmap else None
     if output and expected_services:
@@ -685,16 +692,20 @@ async def run_lifecycle(
             for component in output.get("spec", {}).get("components", [])
         }
         for service in expected_services:
-            assert service in services or service in components
+            if service not in services and service not in components:
+                raise AssertionError(f"service {service!r} missing from output DGD")
 
     if manifest["spec"].get("autoApply", True) is False:
         return result, output
 
     result = await manager.wait_for_phase(
-        name, "Deployed", manager.config.deploy_timeout
+        name,
+        "Deployed",
+        manager.config.profiling_timeout + manager.config.deploy_timeout,
     )
     dgd_name = result.get("status", {}).get("dgdName")
-    assert dgd_name, "dgdName must be set after deployment"
+    if not dgd_name:
+        raise AssertionError("dgdName must be set after deployment")
     if manager.config.mocker:
         return result, output
 
