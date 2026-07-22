@@ -1620,19 +1620,7 @@ pub(super) async fn check_for_backend_error(
             continue;
         }
         if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            return Err(match SanitizedError::for_backend_status(status_code) {
-                Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
-                // 4xx (non-499): protocol contract — forward backend message as-is.
-                None => (
-                    status_code,
-                    Json(ErrorMessage {
-                        message: error_msg,
-                        error_type: map_error_code_to_error_type(status_code),
-                        code: status_code.as_u16(),
-                        details: None,
-                    }),
-                ),
-            });
+            return Err(backend_error_response(error_msg, status_code));
         }
 
         // First non-annotation, non-error event — push it back and stop;
@@ -1641,6 +1629,84 @@ pub(super) async fn check_for_backend_error(
         break;
     }
     Ok(futures::stream::iter(buffered).chain(stream))
+}
+
+/// Convert an `(error_msg, status_code)` pair from `extract_backend_error_if_present`
+/// into the wire `ErrorResponse`. Shared between the non-streaming preflight
+/// (`check_for_backend_error`) and the streaming preflight so both paths speak
+/// the same sanitization + status contract to the client.
+fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorResponse {
+    match SanitizedError::for_backend_status(status_code) {
+        Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
+        // 4xx (non-499): protocol contract — forward backend message as-is.
+        None => (
+            status_code,
+            Json(ErrorMessage {
+                message: error_msg,
+                error_type: map_error_code_to_error_type(status_code),
+                code: status_code.as_u16(),
+                details: None,
+            }),
+        ),
+    }
+}
+
+/// Short pre-commit peek window. synchronous validation/backend errors should surface quickly,
+/// and the short window avoids delaying SSE headers for normal high-TTFT requests.
+const PRE_COMMIT_ERROR_PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Streaming-path preflight peek. Polls the stream for at most
+/// `PRE_COMMIT_ERROR_PEEK_TIMEOUT`, buffering leading annotation frames.
+async fn streaming_preflight_peek(
+    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
+    + Send
+    + Unpin
+    + 'static,
+    inflight_guard: &mut super::metrics::InflightGuard,
+    request_id: &str,
+) -> Result<
+    std::pin::Pin<
+        Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+    >,
+    ErrorResponse,
+> {
+    use futures::stream::StreamExt;
+
+    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+
+    loop {
+        let next = tokio::select! {
+            item = stream.next() => item,
+            _ = tokio::time::sleep(PRE_COMMIT_ERROR_PEEK_TIMEOUT) => {
+                // Peek window elapsed with no error/data frame — commit SSE
+                // and let monitor_for_disconnects handle the rest.
+                return Ok(Box::pin(futures::stream::iter(buffered).chain(stream)));
+            }
+        };
+
+        let Some(event) = next else {
+            // Backend closed before yielding any non-annotation event; replay
+            // buffered annotations so downstream sees them.
+            return Ok(Box::pin(futures::stream::iter(buffered)));
+        };
+
+        if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
+            buffered.push(event);
+            continue;
+        }
+
+        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
+            let err_response = backend_error_response(error_msg, status_code);
+            tracing::error!(request_id, "Backend error detected: {:?}", err_response);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
+
+        // First non-annotation, non-error event — hand back for downstream
+        // consumption with original ordering preserved.
+        buffered.push(event);
+        return Ok(Box::pin(futures::stream::iter(buffered).chain(stream)));
+    }
 }
 
 #[derive(Serialize)]
@@ -1813,7 +1879,7 @@ async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateChatCompletionRequest>,
-    mut stream_handle: ConnectionHandle,
+    stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -1962,24 +2028,14 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        // Peek at the first non-annotation event before committing HTTP 200: if
-        // the engine surfaces a synchronous backend error at t=0 (e.g.
-        // `Backend(InvalidArgument)` from a text-only model receiving image
-        // content, or from an unsupported JSON-schema keyword), we can still
-        // return the correct 4xx status + typed body — same code path as the
-        // non-streaming path. Once HTTP 200 is committed the
-        // downstream `monitor_for_disconnects` fallback can only report errors
-        // as a hardcoded generic 500 SSE frame, so catching here is the only
-        // way to preserve `Backend(InvalidArgument)` -> HTTP 400 on the
-        // streaming path.
-        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
-        let stream = check_for_backend_error(stream)
-            .await
-            .map_err(|err_response| {
-                tracing::error!(request_id, "Backend error detected: {:?}", err_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                err_response
-            })?;
+        // Peek the first non-annotation event for a synchronous backend error
+        // (e.g. `Backend(InvalidArgument)` from a text-only model receiving
+        // image content) before committing HTTP 200, so we can return the
+        // typed 4xx that the non-streaming path returns. The peek window is
+        // short (`PRE_COMMIT_ERROR_PEEK_TIMEOUT`) — if no signal arrives,
+        // fall through to SSE, and `monitor_for_disconnects` owns the long
+        // backend-inactivity timeout from there.
+        let stream = streaming_preflight_peek(stream, &mut inflight_guard, &request_id).await?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
@@ -2290,7 +2346,7 @@ async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
-    mut stream_handle: ConnectionHandle,
+    stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -2454,21 +2510,12 @@ async fn responses(
     let ctx = engine_stream.context();
 
     if streaming {
-        // Peek at the first non-annotation event before committing HTTP 200: if
-        // the engine surfaces a synchronous backend error at t=0 (e.g.
-        // `Backend(InvalidArgument)` from a text-only model receiving image
-        // content, or from an unsupported JSON-schema keyword), return the
-        // correct 4xx status + typed body — same as the non-streaming path.
-        // Once HTTP 200 is committed the downstream error frame is a hardcoded generic 500.
-        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+        // Peek the first non-annotation event for a synchronous backend error
+        // before committing HTTP 200 — same rationale as chat_completions
+        // above. Short peek window; the long backend-inactivity safety net
+        // lives in `monitor_for_disconnects`.
         let engine_stream =
-            check_for_backend_error(engine_stream)
-                .await
-                .map_err(|err_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", err_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
-                })?;
+            streaming_preflight_peek(engine_stream, &mut inflight_guard, &request_id).await?;
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
