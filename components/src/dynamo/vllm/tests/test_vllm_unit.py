@@ -584,6 +584,47 @@ def test_disaggregation_mode_decode(mock_vllm_cli):
     assert config.is_decode_worker is True
 
 
+def test_decode_worker_publishes_configured_kv_events():
+    """Decode workers retain and relay explicitly configured KV events."""
+    kv_events_config = SimpleNamespace(
+        publisher="zmq",
+        topic="kv-events",
+        endpoint="tcp://*:0",
+        enable_kv_cache_events=True,
+    )
+    config = _make_dynamo_config(
+        disaggregation_mode=DisaggregationMode.DECODE,
+        model="Qwen/Qwen3-0.6B",
+        kv_state_endpoint=None,
+    )
+    engine_config = _make_engine_config_with_runner(kv_events_config=kv_events_config)
+
+    update_engine_config_with_dynamo(config, engine_config)
+
+    assert engine_config.kv_events_config is kv_events_config
+    assert config.use_kv_events is True
+    config.engine_args = engine_config
+
+    vllm_config = SimpleNamespace(
+        additional_config=None,
+        cache_config=SimpleNamespace(block_size=16),
+        parallel_config=SimpleNamespace(
+            data_parallel_external_lb=True,
+            data_parallel_rank=0,
+        ),
+    )
+    vllm_main = _load_vllm_main()
+    with (
+        patch.object(vllm_main, "_resolve_image_token_id", return_value=None),
+        patch.object(vllm_main, "KvEventPublisher") as publisher_cls,
+    ):
+        publishers = vllm_main.setup_kv_event_publisher(
+            config, SimpleNamespace(), vllm_config
+        )
+
+    assert publishers == [publisher_cls.return_value]
+
+
 def test_legacy_is_prefill_worker_emits_deprecation(mock_vllm_cli):
     """Test that --is-prefill-worker still works but emits DeprecationWarning."""
     mock_vllm_cli(
