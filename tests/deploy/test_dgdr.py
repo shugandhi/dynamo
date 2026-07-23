@@ -84,7 +84,7 @@ def static_planner_mocker_worker(name: str, mode: str) -> dict:
         "invalid-optimization-type",
     ],
 )
-async def test_dgdr_webhook_rejects_invalid_specs(
+async def test_dgdr_validation_webhook_rejects_invalid_specs(
     dgdr_manager: ManagedDGDR, case: str
 ) -> None:
     """Port the five negative admission tests from the Ginkgo suite."""
@@ -110,7 +110,7 @@ async def test_dgdr_webhook_rejects_invalid_specs(
 
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("fully_specified", [False, True], ids=["minimal", "full"])
-async def test_dgdr_webhook_accepts_valid_specs(
+async def test_dgdr_validation_webhook_accepts_valid_specs(
     dgdr_manager: ManagedDGDR, fully_specified: bool
 ) -> None:
     dgdr = manifest(dgdr_manager, "valid-full" if fully_specified else "valid-minimal")
@@ -129,7 +129,9 @@ async def test_dgdr_webhook_accepts_valid_specs(
 
 
 @pytest.mark.gpu_0
-async def test_dgdr_crd_uses_v1beta1_storage(dgdr_manager: ManagedDGDR) -> None:
+async def test_dgdr_validation_crd_uses_v1beta1_storage(
+    dgdr_manager: ManagedDGDR,
+) -> None:
     crd = await dgdr_manager.get_crd()
     assert "v1beta1" in (crd.status.stored_versions or [])
     storage_versions = [
@@ -139,7 +141,9 @@ async def test_dgdr_crd_uses_v1beta1_storage(dgdr_manager: ManagedDGDR) -> None:
 
 
 @pytest.mark.gpu_0
-async def test_dgdr_crd_registers_shortname(dgdr_manager: ManagedDGDR) -> None:
+async def test_dgdr_validation_crd_registers_shortname(
+    dgdr_manager: ManagedDGDR,
+) -> None:
     crd = await dgdr_manager.get_crd()
     assert "dgdr" in (crd.spec.names.short_names or [])
     result = kubectl(
@@ -149,7 +153,7 @@ async def test_dgdr_crd_registers_shortname(dgdr_manager: ManagedDGDR) -> None:
 
 
 @pytest.mark.gpu_0
-async def test_dgdr_crd_registers_expected_columns(
+async def test_dgdr_validation_crd_registers_expected_columns(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     crd = await dgdr_manager.get_crd()
@@ -161,7 +165,7 @@ async def test_dgdr_crd_registers_expected_columns(
 
 
 @pytest.mark.gpu_0
-async def test_dgdr_v1alpha1_server_dry_run_is_not_internal_error(
+async def test_dgdr_validation_v1alpha1_server_dry_run_is_not_internal_error(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     name = unique_name(dgdr_manager.config, "v1a1")
@@ -188,7 +192,7 @@ spec:
 
 
 @pytest.mark.gpu_0
-async def test_dgdr_v1beta1_object_has_v1alpha1_view(
+async def test_dgdr_validation_v1beta1_object_has_v1alpha1_view(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     dgdr = manifest(dgdr_manager, "conversion-get", {"autoApply": False})
@@ -199,7 +203,7 @@ async def test_dgdr_v1beta1_object_has_v1alpha1_view(
 
 @pytest.mark.gpu_0
 @pytest.mark.timeout(3660)
-async def test_dgdr_reaches_ready_and_profiling_job_succeeds(
+async def test_dgdr_profiling_reaches_ready_and_job_succeeds(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     dgdr = manifest(dgdr_manager, "lifecycle-ready", {"autoApply": False})
@@ -212,7 +216,7 @@ async def test_dgdr_reaches_ready_and_profiling_job_succeeds(
 
 @pytest.mark.gpu_1
 @pytest.mark.timeout(4260)
-async def test_dgdr_reaches_deployed_with_real_worker(
+async def test_dgdr_lifecycle_reaches_deployed_with_real_worker(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     if dgdr_manager.config.mocker:
@@ -296,7 +300,7 @@ async def test_dgdr_profiling_respects_total_gpu_budget(
 @pytest.mark.gpu_0
 @pytest.mark.timeout(4260)
 @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
-async def test_dgdr_rapid_lifecycle_for_each_backend(
+async def test_dgdr_lifecycle_rapid_for_each_backend(
     dgdr_manager: ManagedDGDR, backend: str
 ) -> None:
     dgdr = manifest(
@@ -309,7 +313,7 @@ async def test_dgdr_rapid_lifecycle_for_each_backend(
 
 @pytest.mark.gpu_1
 @pytest.mark.timeout(3660)
-async def test_dgdr_thorough_profiling_without_deployment(
+async def test_dgdr_profiling_thorough_without_deployment(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     dgdr = manifest(
@@ -322,7 +326,7 @@ async def test_dgdr_thorough_profiling_without_deployment(
 
 @pytest.mark.gpu_0
 @pytest.mark.timeout(3660)
-async def test_dgdr_rapid_profiling_without_auto_apply(
+async def test_dgdr_profiling_rapid_without_auto_apply(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     dgdr = manifest(dgdr_manager, "no-autoapply", {"autoApply": False})
@@ -431,7 +435,7 @@ async def test_dgdr_lifecycle_with_custom_hardware(
 
 @pytest.mark.gpu_0
 @pytest.mark.timeout(10920)
-async def test_dgdr_profiles_backends_sequentially(
+async def test_dgdr_profiling_backends_sequentially(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     for backend in ("vllm", "sglang", "trtllm"):
@@ -445,7 +449,7 @@ async def test_dgdr_profiles_backends_sequentially(
 
 @pytest.mark.gpu_0
 @pytest.mark.timeout(3660)
-async def test_dgdr_profile_output_remains_available(
+async def test_dgdr_profiling_output_remains_available(
     dgdr_manager: ManagedDGDR,
 ) -> None:
     dgdr = manifest(

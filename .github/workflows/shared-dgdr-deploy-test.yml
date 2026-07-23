@@ -30,11 +30,19 @@ on:
 
 jobs:
   dgdr-deploy-test:
-    name: CPU
+    name: CPU / ${{ matrix.suite }}
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        suite:
+          - validation
+          - profiling
+          - lifecycle
     env:
-      DGDR_NAMESPACE: dgdr-test-${{ github.run_id }}-${{ github.run_attempt }}
+      DGDR_NAMESPACE: dgdr-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
     steps:
@@ -114,9 +122,9 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo-planner:${{ github.sha }}-dynamo-planner
           platform_arch: amd64
-          test_name: dgdr-cpu
+          test_name: dgdr-${{ matrix.suite }}
           test_file: tests/deploy/test_dgdr.py
-          extra_pytest_args: -m gpu_0 --dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }} --dgdr-hf-token-secret=hf-token-secret
+          extra_pytest_args: -m gpu_0 -k=dgdr_${{ matrix.suite }} --dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suite }} --dgdr-hf-token-secret=hf-token-secret
           cleanup_deployment: 'false'
 
       - name: Clean up DGDR test namespace

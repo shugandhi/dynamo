@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import tests.deploy.test_dgdr as dgdr_tests
 from tests.deploy.dgdr_utils import (
     DGDRCleanupError,
     DGDRTestConfig,
@@ -17,6 +18,22 @@ from tests.deploy.dgdr_utils import (
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+def test_all_dgdr_tests_have_ci_suite_prefix() -> None:
+    prefixes = (
+        "test_dgdr_validation_",
+        "test_dgdr_profiling_",
+        "test_dgdr_lifecycle_",
+    )
+    unassigned = sorted(
+        name
+        for name, value in vars(dgdr_tests).items()
+        if name.startswith("test_dgdr_")
+        and callable(value)
+        and not name.startswith(prefixes)
+    )
+    assert not unassigned, f"DGDR tests missing a CI suite prefix: {unassigned}"
 
 
 def initialized_manager() -> ManagedDGDR:
