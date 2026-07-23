@@ -8,8 +8,8 @@ import argparse
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm
 
-from .registry import Registry
-from .rpc import RPCServer
+from .server.allocations import AllocationStore
+from .server.rpc import AllocationRPCServer
 
 
 def _gpu_uuid(device: int) -> str:
@@ -25,8 +25,8 @@ def main() -> None:
     args = parser.parse_args()
     path = args.socket_path or get_socket_path(args.device, "snapshot-v1")
     vmm = get_vmm()
-    registry = Registry(_gpu_uuid(args.device), vmm, args.device)
-    with RPCServer(path, registry) as server:
+    allocations = AllocationStore(_gpu_uuid(args.device), vmm, args.device)
+    with AllocationRPCServer(path, allocations) as server:
         server.serve_forever()
 
 

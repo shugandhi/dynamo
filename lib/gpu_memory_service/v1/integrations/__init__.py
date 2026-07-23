@@ -1,4 +1,4 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental, ownership-minimal Dynamo Snapshot GPU Memory Service."""
+"""Framework-specific bindings for experimental GMS V1."""

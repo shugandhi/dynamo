@@ -1,143 +1,100 @@
-# Snapshot-only GPU Memory Service V1
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-V1 has one fail-stop contract: Dynamo Snapshot/CRIU restores the engine
-process and all Python, `TensorImpl`, `StorageImpl`, alias, and module topology;
-an unchanged sidecar preserves exact parameter allocation IDs and physical
-backing on the same GPU.
+# GPU Memory Service V1
 
-Torch 2.11 uses two dedicated CUDA `MemPool`s. Parameter allocations are
-writable while loading, become read-only as one complete set before the
-artifact is published, and preserve their backing across capture. Private
-allocations are discarded during sleep and receive fresh read-write backing at
-the CRIU-preserved virtual addresses after restore.
+GMS V1 is an experimental, Dynamo Snapshot-only GPU memory owner. It assumes
+one persistent GMS sidecar process on the same physical GPU as the
+checkpointed process. There is no compatibility mode or model-loading API.
 
-These are generic allocation domains, not model- or backend-specific memory
-types. The server owns only allocation IDs and physical handles/backing. It
-never receives virtual addresses, tensor identities, shapes, or model
-metadata. The checkpointed client remains the sole owner of tensors,
-`TensorImpl`s, `StorageImpl`s, aliases, and virtual addresses.
+## Ownership
 
-Capture destroys the dedicated pools so Torch evicts inactive segments.
-Registered CUDA `Parameter` storages are deduplicated by `UntypedStorage`
-identity, resolved by complete range containment to one parameter mapping, and
-then deduplicated by exact containing allocation. Sleep/wake process each
-canonical allocation mapping once; V1 never serializes or reconstructs tensor
-topology. Registered buffers are never parameter-backed: capture rejects every
-live CUDA named-buffer storage range that overlaps a parameter mapping.
+The checkpointed client owns:
 
-## vLLM workspace allocation scope
+- Tensor, TensorImpl, StorageImpl, aliases, views, and model topology;
+- virtual addresses and one canonical record per allocator segment;
+- the `parameter_ro` versus `private_rw` access class;
+- imports, mappings, pool lifetime, and fail-stop sleep/wake/retire state.
 
-The pinned vLLM 0.25.1 adapter is an explicit, instance-local binding from
-`WorkspaceManager` growth to a caller-supplied allocation scope:
+The sidecar owns only:
 
-```python
-from gpu_memory_service.v1.vllm import install_workspace_routing
-from vllm.v1.worker.workspace import current_workspace_manager
+- a random process-incarnation nonce and the physical GPU UUID;
+- allocation ID to aligned size, physical handle, and retained export FD.
 
-install_workspace_routing(current_workspace_manager(), pools.private_pool)
+`hello`, `allocate`, `export`, and `free` are the complete RPC protocol.
+Allocation IDs are caller-generated. Repeating `allocate` with the same ID and
+size or repeating `free` is safe after response loss. Reusing an ID with a
+different size fails.
+
+The client records the sidecar nonce and GPU UUID on its first connection.
+Every transport reconnect and every wake verifies both values before an
+allocation mutation or mapping. A restarted sidecar or different physical GPU
+is terminal.
+
+## Snapshot lifecycle
+
+Torch uses two MemPools backed by the same pluggable allocator callbacks:
+
+- parameter allocations enter the `parameter_ro` domain;
+- private/runtime allocations enter the `private_rw` domain.
+
+`SnapshotTorchPools.prepare_snapshot()` accepts no model. It destroys and
+evicts both pools, observes the allocator's void-return free callback latch,
+synchronizes the GPU, changes the complete locally recorded parameter domain
+to read-only, unmaps and releases each local import once, and frees private
+physical backing. Pool destruction and allocator callbacks define allocation
+identity; production code does not inspect Parameters, buffers, or storages.
+
+After CRIU restore, `SnapshotMemoryManager.wake()` reimports the surviving
+parameter backing read-only at its preserved VA. It creates a fresh allocation
+ID and physical backing for each private mapping, then maps that backing
+read-write at the preserved VA.
+
+Cleanup failures are fail-stop. The manager retains imports or physical
+allocation IDs whenever ownership cannot be proved released, while continuing
+independent cleanups in reverse order.
+
+## vLLM
+
+V1 requires every private/runtime (mutable) allocation to be created during
+initialization or warmup, **before** snapshot preparation, so it is captured in
+the private pool and restored with fresh backing at its preserved VA on wake.
+
+`install_vllm_integration()` runs before model construction and routes the one
+validated mutable path: active-DBO `WorkspaceManager._ensure_workspace_size`
+growth. Growth enters the private pool even beneath an outer parameter pool. A
+no-growth call bypasses a destroyed private pool; growth after pool destruction
+fails. Reinstalling the same pool owner is idempotent; a second owner or a
+replaced hook fails before use.
+
+Kernels that lazily allocate scratch during serving `forward()` — e.g. certain
+quantized MoE paths such as Marlin MoE / Humming — are **not** supported by V1.
+The private MemPool is destroyed at snapshot preparation and never recreated,
+so a post-wake `forward()` would allocate into a dead pool. Supporting them
+would require a private-pool post-wake lifecycle that is out of scope. The
+validated dense target (Qwen3-0.6B) never exercises these paths.
+
+The outer parameter pool is confined to vLLM model construction, weight load,
+and post-load creation of immutable weights. It must exit before memory
+profiling, KV-cache allocation, warmup, or CUDA graph capture. The model-shaped
+EP preparation at the end of `GPUModelRunner.load_model()` initializes modular
+communication backends. Its model walk selects MoE layers but does not create
+another model-owned mutable tensor: routing tables were already constructed
+with the model, and DeepEP/NIXL/MORI communication backing is returned by raw
+backend `get_handle()` objects. Those raw NCCL/communication allocations bypass
+Torch MemPools and remain the Snapshot/backend hook's responsibility, not GMS
+allocation records.
+
+## Commands and tests
+
+The only V1 console command is:
+
+```text
+gms-v1-server --device 0 [--socket-path PATH]
 ```
 
-Only growth enters the supplied scope, so an outer parameter scope is
-overridden for the allocation itself. A no-growth call does not enter the scope
-and therefore remains valid after capture destroys the pools. Growth after
-destruction fails instead of allocating through an ambient allocator.
-Installation with the same manager and scope is idempotent; conflicting
-ownership or a replaced allocation hook fails. V1 itself has no workspace
-allocation class or workspace lifecycle state.
-
-The binding is intentionally installed once for one V1 generation in one
-engine process. V1 does not support uninstalling it or reusing the process for
-a later generation; process teardown ends the binding's lifetime.
-
-## Qwen3-0.6B E2E scope
-
-`qwen_e2e.py` loads `Qwen/Qwen3-0.6B` on CPU with the standard Transformers
-`AutoModelForCausalLM.from_pretrained()` loader. It moves registered buffers,
-including `rotary_emb.inv_freq`, through the native CUDA allocator while
-preserving repeated registrations of the same buffer object, then activates
-the V1 parameter domain only for standard Parameter migration. It does not use
-legacy `--load-format gms`, a meta-model, tensor metadata, a model manifest, or
-custom tensor reconstruction. It performs deterministic greedy inference with
-`use_cache=False`, captures through `SnapshotConfig.run_lifecycle`, and emits
-`GMS_V1_EVIDENCE` JSON proving:
-
-- generated token and decoded output equality;
-- one digest over model, Parameter and registered-buffer bindings,
-  `TensorImpl`, `StorageImpl`, and data-pointer identities;
-- stable parameter allocation IDs and virtual address ranges;
-- a deliberate private probe with a fresh allocation ID at the same
-  read-write virtual address and a successful post-wake write;
-- the same physical GPU UUID; and
-- GMS sidecar PID and startup-nonce continuity.
-
-This is intentionally an in-process Transformers Qwen model test. It validates
-real Qwen parameter/storage Snapshot behavior without introducing worker
-subprocess ownership ambiguity; it does not claim coverage of vLLM scheduling,
-KV cache, CUDA graphs, or request serving. The separate vLLM integration and
-real-CUDA subprocess tests cover workspace allocation routing.
-
-## Commands
-
-Start the non-checkpointed sidecar:
-
-```bash
-gms-v1-server --device 0 --socket-path /gms/gms-v1.sock
-```
-
-Run the engine inside a Dynamo Snapshot target container:
-
-```bash
-gms-v1-e2e \
-  --device 0 \
-  --socket-path /gms/gms-v1.sock \
-  --artifact-id "${CHECKPOINT_ID}" \
-  --standby-marker /state/captured
-```
-
-This toy harness remains the fast lifecycle smoke test.
-
-## DRA + Snapshot deployment test
-
-The collected test creates one DRA `ResourceClaimTemplate`, one two-container
-Pod, and one `PodSnapshot`. It snapshots only `engine`, restores that container
-in place, proves the `gms-server` container never restarted, and machine-checks
-inference, object/storage/data-pointer identity, stable parameter allocation
-IDs, and fresh private backing.
-
-It requires explicit cluster placement and never evicts workloads:
-
-```bash
-KUBE_CONTEXT=<context> \
-NAMESPACE=<namespace> \
-NODE=<gpu-node> \
-IMAGE=<torch-2.11-dynamo-image> \
-IMAGE_PULL_SECRET=<registry-pull-secret> \
-CHECKPOINT_PVC=<snapshot-pvc> \
-lib/gpu_memory_service/v1/deploy/run.sh
-```
-
-Optional variables are `CHECKPOINT_PATH` (default `/checkpoints`),
-`DEVICE_CLASS` (default `gpu.nvidia.com`), and `RUNTIME_CLASS` (default
-`nvidia`). The test deletes only its uniquely named resources.
-
-The Qwen deployment uses the same raw Pod, PodSnapshot, engine-only capture,
-shared DRA claim, persistent GMS sidecar, and checkpoint PVC topology. It also
-requires an offline model-cache PVC and an explicit exact DeviceClass name:
-
-```bash
-KUBE_CONTEXT=<context> \
-NAMESPACE=<namespace> \
-NODE=<gpu-node> \
-IMAGE=<torch-2.11-transformers-dynamo-image> \
-IMAGE_PULL_SECRET=<registry-pull-secret> \
-CHECKPOINT_PVC=<snapshot-pvc> \
-MODEL_CACHE_PVC=<qwen-cache-pvc> \
-DEVICE_CLASS=<exact-device-class-name> \
-lib/gpu_memory_service/v1/deploy/run-qwen.sh
-```
-
-Optional Qwen variables are `MODEL` (default `Qwen/Qwen3-0.6B`),
-`MODEL_CACHE_PATH` (default `/model-cache`), `CHECKPOINT_PATH` (default
-`/checkpoints`), and `RUNTIME_CLASS` (default `nvidia`). The cache must already
-contain the model because both Hugging Face Hub and Transformers offline modes
-are enabled.
+Behavioral tests live with the existing GMS suite in
+`lib/gpu_memory_service/tests/test_v1_*.py`. No test engine, manifest, shell
+asset, or model-specific workload is installed as product data.
