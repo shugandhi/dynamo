@@ -6,9 +6,9 @@
 from __future__ import annotations
 
 import gc
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
-import threading
 from typing import TYPE_CHECKING
 
 from ...errors import FatalGMSError, GMSError
@@ -86,10 +86,12 @@ class SnapshotTorchPools:
         if _allocator_ext is None:
             raise RuntimeError("GPU Memory Service allocator extension is not built")
         _allocator_ext.init_module_strict(self._allocator.malloc, self._allocator.free)
-        pluggable = torch.cuda.CUDAPluggableAllocator(
+        # MemPools and live storages hold only a non-owning native pointer.
+        # The process runtime retains this wrapper after pool teardown.
+        self._pluggable_allocator = torch.cuda.CUDAPluggableAllocator(
             _allocator_ext.__file__, "my_malloc", "my_free"
         )
-        native = pluggable.allocator()
+        native = self._pluggable_allocator.allocator()
         with torch.cuda.device(self.device):
             self.parameter: torch.cuda.MemPool | None = torch.cuda.MemPool(
                 allocator=native

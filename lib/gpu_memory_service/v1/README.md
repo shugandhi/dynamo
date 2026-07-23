@@ -62,12 +62,41 @@ V1 requires every private/runtime (mutable) allocation to be created during
 initialization or warmup, **before** snapshot preparation, so it is captured in
 the private pool and restored with fresh backing at its preserved VA on wake.
 
+Select the dedicated worker explicitly while preserving vLLM's normal load
+format:
+
+```text
+python -m dynamo.vllm ... \
+  --worker-cls gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker
+```
+
+The worker constructs one allocation client, memory manager, and pair of Torch
+pools after vLLM initializes its CUDA device and `WorkspaceManager`. It routes
+vLLM's native `weights` allocation scope to the parameter pool and `kv_cache`
+scope to the private pool. There is no V1 model loader or `--load-format gms`
+registration.
+
 `install_vllm_integration()` runs before model construction and routes the one
 validated mutable path: active-DBO `WorkspaceManager._ensure_workspace_size`
 growth. Growth enters the private pool even beneath an outer parameter pool. A
 no-growth call bypasses a destroyed private pool; growth after pool destruction
-fails. Reinstalling the same pool owner is idempotent; a second owner or a
-replaced hook fails before use.
+fails.
+
+The worker also selects the vLLM `SleepModeBackend` registered by its module.
+Suspend prepares the V1 pools for Snapshot, and resume wakes the V1 manager.
+Only whole-engine level-1 suspend and untagged resume are accepted. A partial
+transition is terminal. The dedicated worker exits after any valid transition
+attempt fails, so vLLM's multiprocess RPC loop cannot convert a partial
+lifecycle failure into a recoverable response and continue serving.
+
+This milestone supports only single-GPU Qwen3-0.6B. Distributed and multi-GPU
+communicator checkpoint preparation and restore are deferred and are not part
+of this backend.
+
+For KV sizing, the V1 worker preserves the normal model loader's active-byte
+delta and adds only the parameter pool's inactive reserved segment bytes.
+Parameter cache cannot be reused by KV, while inactive private cache can. This
+is the only V1 adjustment to vLLM's model-memory value.
 
 Kernels that lazily allocate scratch during serving `forward()` — e.g. certain
 quantized MoE paths such as Marlin MoE / Humming — are **not** supported by V1.
@@ -76,16 +105,11 @@ so a post-wake `forward()` would allocate into a dead pool. Supporting them
 would require a private-pool post-wake lifecycle that is out of scope. The
 validated dense target (Qwen3-0.6B) never exercises these paths.
 
-The outer parameter pool is confined to vLLM model construction, weight load,
-and post-load creation of immutable weights. It must exit before memory
-profiling, KV-cache allocation, warmup, or CUDA graph capture. The model-shaped
-EP preparation at the end of `GPUModelRunner.load_model()` initializes modular
-communication backends. Its model walk selects MoE layers but does not create
-another model-owned mutable tensor: routing tables were already constructed
-with the model, and DeepEP/NIXL/MORI communication backing is returned by raw
-backend `get_handle()` objects. Those raw NCCL/communication allocations bypass
-Torch MemPools and remain the Snapshot/backend hook's responsibility, not GMS
-allocation records.
+The outer parameter pool is confined to vLLM model construction and weight
+load. It exits before memory profiling, KV-cache allocation, warmup, or CUDA
+graph capture. NCCL and other raw CUDA allocations can bypass Torch MemPools
+and remain outside GMS allocation records; their checkpoint lifecycle is out
+of scope for this single-GPU milestone.
 
 ## Commands and tests
 

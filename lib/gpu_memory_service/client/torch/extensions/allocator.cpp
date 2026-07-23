@@ -116,9 +116,7 @@ py_init_module(PyObject* self, PyObject* args)
 
   const Callbacks& installed = callbacks(malloc_cb, free_cb);
   if (installed.malloc_cb != malloc_cb || installed.free_cb != free_cb) {
-    PyErr_SetString(
-        PyExc_RuntimeError,
-        "allocator callbacks are already registered by another owner");
+    PyErr_SetString(PyExc_RuntimeError, "allocator callbacks are already registered by another owner");
     return nullptr;
   }
 
@@ -142,9 +140,7 @@ py_init_module_strict(PyObject* self, PyObject* args)
 
   const Callbacks& installed = callbacks(malloc_cb, free_cb);
   if (installed.malloc_cb != malloc_cb || installed.free_cb != free_cb) {
-    PyErr_SetString(
-        PyExc_RuntimeError,
-        "allocator callbacks are already registered by another owner");
+    PyErr_SetString(PyExc_RuntimeError, "allocator callbacks are already registered by another owner");
     return nullptr;
   }
 
@@ -153,10 +149,7 @@ py_init_module_strict(PyObject* self, PyObject* args)
 
 static PyMethodDef module_methods[] = {
     {"init_module", py_init_module, METH_VARARGS, "Set malloc/free callbacks"},
-    {"init_module_strict",
-     py_init_module_strict,
-     METH_VARARGS,
-     "Set one exact malloc/free callback owner"},
+    {"init_module_strict", py_init_module_strict, METH_VARARGS, "Set one exact malloc/free callback owner"},
     {nullptr, nullptr, 0, nullptr}};
 
 static struct PyModuleDef allocator_module = {

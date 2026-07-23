@@ -6,9 +6,9 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+import threading
 from contextlib import nullcontext
 from importlib.util import find_spec
-import threading
 from types import SimpleNamespace
 
 import pytest
@@ -111,7 +111,6 @@ def test_real_cuda_torch_vllm_snapshot_lifecycle() -> None:
                     manager = SnapshotMemoryManager(client, vmm, 0)
                     pools = SnapshotTorchPools(manager)
                     workspaces = WorkspaceManager(torch.device("cuda:0"))
-                    install_vllm_integration(workspaces, pools)
                     install_vllm_integration(workspaces, pools)
 
                     second_manager = SnapshotMemoryManager(client, vmm, 0)
