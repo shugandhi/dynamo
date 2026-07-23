@@ -34,13 +34,13 @@ over ZMQ.
 
 | Concern | Standalone mode, in-process selector (gap vs full Dynamo) |
 |---|---|
+Disaggregated prefill/decode | Not yet supported. Planned follow-up.
+Data parallelism | Not yet supported. Targets DP=1.
+Cross-replica KV-index warm-up | Not wired; a new replica re-warms from live traffic + replay.
+Per-tenant KV cache isolation with x-tenant-id / cache_salt | KV routing per tenant is not supported at this time. This requires per-engine support
 Transient disconnects | The in-process indexer reconnects on its own and keeps routing. KV-cache updates the worker sent during the gap are recovered from the worker's **replay** socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (and the vLLM worker exposes one); otherwise the index refreshes from new traffic.
 Dropped events / gaps | The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.
 Initial cache state | A fresh or restarted EPP starts with an empty index and re-warms from live traffic + replay. Replicas share active load (admission/prefill/free) but not KV-index state.
-Data parallelism | V1 targets DP=1.
-Disaggregated prefill/decode | Not supported by these PRs (aggregated: prefill and decode share one worker). Planned follow-up.
-Cross-replica KV-index warm-up | Not wired; a new replica re-warms from live traffic + replay.
-x-tenant-id / cache_salt | KV routing per tenant is not supported at this time. his requires per-engine support
 
 ## Supported and Caveats
 
