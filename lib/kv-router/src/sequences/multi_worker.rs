@@ -13,7 +13,6 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
-use std::env;
 use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
@@ -27,7 +26,7 @@ use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{
-    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
+    ActiveSequences, PromptMembershipDelta, RequestCleanupPolicy, RequestId, RequestTiming,
 };
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
@@ -36,52 +35,13 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 
-// How often we force expire stale requests across all workers. See the comment
+// How often we force expire orphan-guarded requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
 // more details.
 const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Minimum interval between repeated logs for a saturated or unexpectedly closed publish queue.
 const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Environment override for the stale active-request cleanup guard.
-const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
-
-/// Returns the configured stale active-request cleanup guard.
-fn active_request_expiry_duration() -> Duration {
-    active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
-}
-
-/// Parses the cleanup guard from an environment lookup, falling back on invalid input.
-fn active_request_expiry_duration_from_lookup(
-    get_env: impl Fn(&str) -> Option<String>,
-) -> Duration {
-    let Some(raw) = get_env(DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS) else {
-        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
-    };
-
-    let Ok(seconds) = raw.parse::<u64>() else {
-        tracing::warn!(
-            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
-            value = %raw,
-            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
-            "invalid active request expiry override, falling back to default"
-        );
-        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
-    };
-
-    if seconds == 0 {
-        tracing::warn!(
-            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
-            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
-            "active request expiry override must be greater than zero, falling back to default"
-        );
-        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
-    }
-
-    Duration::from_secs(seconds)
-}
-
 // ---------------------------------------------------------------------------
 // Traits
 // ---------------------------------------------------------------------------
@@ -268,7 +228,7 @@ pub enum ReplicaWorkerPolicy {
 #[derive(Debug, Clone, Copy)]
 struct SequenceTrackerOptions {
     replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_duration: Option<Duration>,
+    orphan_cleanup_enabled: bool,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -367,39 +327,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                expiry_duration: None,
-            },
-        )
-    }
-
-    /// Create a tracker with an explicit stale active-request cleanup guard.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `expiry_duration` or `block_size` is zero.
-    pub fn new_with_expiry_duration(
-        publisher: P,
-        block_size: usize,
-        dp_range: HashMap<u64, (u32, u32)>,
-        replica_sync: bool,
-        router_id: u64,
-        worker_type: &'static str,
-        expiry_duration: Duration,
-    ) -> Self {
-        assert!(
-            !expiry_duration.is_zero(),
-            "expiry_duration must be greater than zero"
-        );
-        Self::new_with_options(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-            SequenceTrackerOptions {
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                expiry_duration: Some(expiry_duration),
+                orphan_cleanup_enabled: false,
             },
         )
     }
@@ -423,12 +351,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy,
-                expiry_duration: Some(active_request_expiry_duration()),
+                orphan_cleanup_enabled: true,
             },
         )
     }
 
-    /// Builds a tracker from resolved replica-admission and expiry policies.
+    /// Builds a tracker from resolved replica-admission and cleanup policies.
     fn new_with_options(
         publisher: P,
         block_size: usize,
@@ -440,11 +368,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = match options.expiry_duration {
-            Some(duration) => {
-                WorkerTable::new_with_expiry_duration(block_size, &dp_range, duration)
-            }
-            None => WorkerTable::new_without_expiry(block_size, &dp_range),
+        let workers = if options.orphan_cleanup_enabled {
+            WorkerTable::new(block_size, &dp_range)
+        } else {
+            WorkerTable::new_without_expiry(block_size, &dp_range)
         };
         let initial_workers: Vec<_> = workers.workers().collect();
         let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
@@ -740,12 +667,36 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.maybe_cleanup();
     }
 
+    /// Adds an externally managed request with the fixed orphan-cleanup grace period.
     pub fn add_request(
         &self,
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.add_request_impl(req, decay_now, true)
+        self.add_request_impl(
+            req,
+            RequestTiming {
+                cleanup_policy: RequestCleanupPolicy::OrphanGuarded,
+                decay_now,
+            },
+            true,
+        )
+    }
+
+    /// Add a request whose local lifecycle guard guarantees explicit cleanup.
+    pub(crate) fn add_lifecycle_owned_request(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
+        self.add_request_impl(
+            req,
+            RequestTiming {
+                cleanup_policy: RequestCleanupPolicy::LifecycleOwned,
+                decay_now,
+            },
+            true,
+        )
     }
 
     /// Add a request only when its worker is already registered.
@@ -757,13 +708,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.add_request_impl(req, decay_now, false)
+        self.add_request_impl(
+            req,
+            RequestTiming {
+                cleanup_policy: RequestCleanupPolicy::OrphanGuarded,
+                decay_now,
+            },
+            false,
+        )
     }
 
     fn add_request_impl(
         &self,
         req: SequenceRequest,
-        decay_now: Instant,
+        timing: RequestTiming,
         lazily_register_worker: bool,
     ) -> Result<(), SequenceError> {
         let event = self.replica_sync.then(|| ActiveSequenceEvent {
@@ -778,7 +736,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
         });
-        self.add_request_local(req, decay_now, lazily_register_worker)?;
+        self.add_request_local(req, timing, lazily_register_worker)?;
         if let Some(event) = event {
             self.enqueue_publish_event(event);
         }
@@ -1016,7 +974,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.active_request_counts()
     }
 
-    /// Force expire stale requests across all workers (one-shot).
+    /// Force expire orphan-guarded requests across all workers (one-shot).
     ///
     /// This is necessary because worker expiration otherwise only runs as a side-effect
     /// of `add_request`. If a worker has many expired active sequences and no new
@@ -1048,7 +1006,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         tracing::debug!(
             duration = duration.as_secs_f64(),
             removed_request_count,
-            "Force expired stale requests across all workers"
+            "Force expired orphan-guarded requests across all workers"
         );
     }
 
@@ -1109,9 +1067,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     fn add_request_local(
         &self,
         req: SequenceRequest,
-        decay_now: Instant,
+        timing: RequestTiming,
         lazily_register_worker: bool,
     ) -> Result<(), SequenceError> {
+        let decay_now = timing.decay_now;
         let SequenceRequest {
             request_id,
             token_sequence,
@@ -1146,13 +1105,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             }
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
-            let outcome = seq.add_request_with_prefill_tracking(
+            let outcome = seq.add_request_with_cleanup_policy(
                 request_id,
                 token_sequence,
                 expected_output_tokens,
                 track_prefill_tokens,
                 prefill_load_hint,
-                decay_now,
+                timing,
             );
             let load = seq.worker_load_snapshot();
             self.prompt_registry.apply_membership_delta_and_load(
@@ -1332,50 +1291,7 @@ mod tests {
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
 
-    /// Verifies that a positive expiry override is accepted.
-    #[test]
-    fn active_request_expiry_duration_override_uses_positive_seconds() {
-        let lookup =
-            |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| "3600".to_string());
-
-        assert_eq!(
-            active_request_expiry_duration_from_lookup(lookup),
-            Duration::from_secs(3600)
-        );
-    }
-
-    /// Verifies that absent and invalid expiry overrides use the default.
-    #[test]
-    fn active_request_expiry_duration_override_falls_back_to_default() {
-        assert_eq!(
-            active_request_expiry_duration_from_lookup(|_| None),
-            DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
-        );
-        for value in ["", "abc", "0"] {
-            let lookup = |key: &str| {
-                (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| value.to_string())
-            };
-            assert_eq!(
-                active_request_expiry_duration_from_lookup(lookup),
-                DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
-            );
-        }
-    }
-
-    /// Verifies that zero duration is rejected before worker-table construction.
-    #[test]
-    #[should_panic(expected = "expiry_duration must be greater than zero")]
-    fn custom_expiry_rejects_zero_duration_at_multi_worker_boundary() {
-        let _ = ActiveSequencesMultiWorker::new_with_expiry_duration(
-            NoopSequencePublisher,
-            4,
-            HashMap::new(),
-            false,
-            0,
-            "test",
-            Duration::ZERO,
-        );
-    }
+    const AFTER_ORPHAN_GRACE: Duration = Duration::from_secs(15 * 60 + 1);
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
         ActiveSequencesMultiWorker::new(
@@ -2275,7 +2191,7 @@ mod tests {
             )
             .unwrap();
 
-        tokio::time::advance(Duration::from_secs(331)).await;
+        tokio::time::advance(AFTER_ORPHAN_GRACE).await;
         sequences.force_expire_requests_across_all_workers();
 
         assert!(sequences.request_index.is_empty());
@@ -2320,7 +2236,7 @@ mod tests {
                 .unwrap();
         }
 
-        tokio::time::advance(Duration::from_secs(331)).await;
+        tokio::time::advance(AFTER_ORPHAN_GRACE).await;
         sequences.force_expire_requests_across_all_workers();
 
         assert_eq!(active_request_count(&sequences, initial_worker), 1);
@@ -2354,7 +2270,7 @@ mod tests {
             )
             .unwrap();
 
-        tokio::time::advance(Duration::from_secs(331)).await;
+        tokio::time::advance(AFTER_ORPHAN_GRACE).await;
 
         sequences
             .add_request(
@@ -2972,6 +2888,38 @@ mod tests {
         );
         assert!(!sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replica_sync_add_remains_orphan_guarded() {
+        let sequences = ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            true,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(replica_add(
+                        "replica-orphan",
+                        worker,
+                        vec![1, 2, 3],
+                    ))]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::advance(AFTER_ORPHAN_GRACE).await;
+        sequences.force_expire_requests_across_all_workers();
+
+        sequences.assert_completely_drained(Instant::now());
     }
 
     #[tokio::test]
