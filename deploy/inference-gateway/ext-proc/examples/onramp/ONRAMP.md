@@ -37,19 +37,19 @@ over ZMQ.
 Transient disconnects | The in-process indexer reconnects on its own and keeps routing. KV-cache updates the worker sent during the gap are recovered from the worker's **replay** socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (and the vLLM worker exposes one); otherwise the index refreshes from new traffic.
 Dropped events / gaps | The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.
 Initial cache state | A fresh or restarted EPP starts with an empty index and re-warms from live traffic + replay. Replicas share active load (admission/prefill/free) but not KV-index state.
-Backpressure / EPP restart | vLLM PUB drops to slow subscribers (ZMQ HWM) can be silently lost; on restart the index starts empty and re-warms from new traffic.
 Data parallelism | V1 targets DP=1.
 Disaggregated prefill/decode | Not supported by these PRs (aggregated: prefill and decode share one worker). Planned follow-up.
-Cross-replica KV-index warm-up is not wired; a new replica re-warms from live traffic + replay.
+Cross-replica KV-index warm-up | Not wired; a new replica re-warms from live traffic + replay.
 x-tenant-id / cache_salt | KV routing per tenant is not supported at this time. his requires per-engine support
 
-## Still supported
+## Supported and Caveats
 
 | Concern | Standalone mode, in-process selector (gap vs full Dynamo) |
 |---|---|
+Multi-replica EPP | Supported: set `DYN_EPP_PEER_SERVICE` so replicas sync active load over ZMQ
 Duplicate store/remove (vLLM "retries") | parity
 In-stream ordering | parity
-Multi-replica EPP | Supported: set `DYN_EPP_PEER_SERVICE` so replicas sync active load over ZMQ (`agg.yaml` runs 2 replicas).
+Backpressure / EPP restart | Slow-subscriber drops (ZMQ HWM) surface as a seq gap: detected and replayed when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (logged, not silent), lost only without a replay socket. On restart the index starts empty and re-warms from replay-from-0 plus live traffic.
 
 ## Examples
 
