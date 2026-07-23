@@ -404,19 +404,3 @@ Optional:
 | `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | unset | Per-worker max batched tokens (needed only when selector queueing is enabled) |
 | `DYN_ROUTER_*` | router defaults | Scoring/queueing knobs parsed by the standard router config (e.g. `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`) |
 | `DYN_SECURE_SERVING` | `true` | EPP gRPC TLS toggle |
-
-Not used in this mode (unlike the old inert-runtime design): `DYN_EPP_POD_SELECTOR`,
-`DYN_EPP_TARGET_PORT` (both come from the `InferencePool`), `DYN_DISCOVERY_BACKEND`,
-`DYN_EVENT_PLANE` (no Dynamo runtime/event plane), and the disagg knobs
-(`DYN_EPP_ROLE_LABEL`, `DYN_ENFORCE_DISAGG`, `DYN_EPP_EMIT_PREFILLER_HOST_PORT`).
-
-## How KV events reach the router without NATS
-
-Vanilla vLLM publishes native KV-cache events on a ZMQ PUB socket
-(`--kv-events-config`). In standalone mode there is **no republisher and no
-event plane**: for each Ready pod the EPP registers the pod's KV-event
-endpoint (`tcp://<pod_ip>:<DYN_EPP_KV_EVENT_PORT>`) into the in-process
-`SelectionCore`, whose indexer **subscribes directly** to that PUB socket and
-maintains the KV/prefix index the selector scores against. When
-`DYN_EPP_KV_EVENT_REPLAY_PORT` is set, the indexer also backfills missed events from the
-worker's replay socket.
