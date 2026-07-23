@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, replace
 from enum import Enum
-import threading
 from uuid import uuid4
 
 from gpu_memory_service.common.locks import GrantedLockType

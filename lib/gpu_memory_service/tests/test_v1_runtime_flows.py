@@ -15,8 +15,7 @@ from gpu_memory_service.v1.client.memory_manager import (
     SnapshotMemoryManager,
 )
 from gpu_memory_service.v1.client.rpc import AllocationClient
-from gpu_memory_service.v1.errors import GMSError
-from gpu_memory_service.v1.errors import FatalGMSError
+from gpu_memory_service.v1.errors import FatalGMSError, GMSError
 from gpu_memory_service.v1.server.allocations import AllocationStore
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
