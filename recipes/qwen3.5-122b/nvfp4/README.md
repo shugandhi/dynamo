@@ -118,8 +118,8 @@ is system throughput / GPUs. Aggregated runs `replicas: 2`.
 
 | Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
 |--------|-----|----------|----------|-----|-------------|-------------------|------------|-------------------------|
-| `vllm/agg-b200-agentic/deploy.yaml` | B200 | AGG (2x TP1) | agentic | no | 50 | 52.4 | 246 ms | 1173.2 |
-| `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P2D | agentic | no | 60 | 51.4 | 1353 ms | 916.6 |
+| `vllm/agg-b200-agentic/deploy.yaml` | B200 | AGG, 2x TP1 (2 GPU) | agentic | no | 50 | 52.4 | 246 ms | 1173.2 |
+| `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P2D (3 GPU) | agentic | no | 60 | 51.4 | 1353 ms | 916.6 |
 
 ## Limitations
 
